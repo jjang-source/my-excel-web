@@ -9,8 +9,8 @@ app = FastAPI()
 security = HTTPBasic()
 
 # 🔐 마스터 관리자 ID / PW
-ADMIN_USERNAME = "cheongwon"
-ADMIN_PASSWORD = "cheongwon"
+ADMIN_USERNAME = "admin123"
+ADMIN_PASSWORD = "super-secret-password-99"
 
 def authenticate_admin(credentials: HTTPBasicCredentials = Depends(security)):
     if credentials.username != ADMIN_USERNAME or credentials.password != ADMIN_PASSWORD:
@@ -38,11 +38,10 @@ CREATE TABLE IF NOT EXISTS student_courses (
 """)
 conn.commit()
 
-# [최초 1회 실행] 업로드된 학생 데이터 로드 (한국형 엑셀 CSV 인코딩 완벽 대응)
+# [최초 1회 실행] 업로드된 학생 데이터 로드
 def load_initial_excel_data():
     cursor.execute("SELECT COUNT(*) FROM student_courses")
     if cursor.fetchone()[0] == 0:
-        # 여러 한글 인코딩 방식을 순서대로 시도하여 깨짐 방지
         encodings = ["utf-8-sig", "cp949", "utf-8", "euc-kr"]
         df = None
         for enc in encodings:
@@ -55,21 +54,35 @@ def load_initial_excel_data():
 
         if df is not None:
             try:
+                # 엑셀/CSV 열 이름의 앞뒤 공백 제거 및 정리
+                df.columns = [col.strip() for col in df.columns]
+                
+                # '세특담당교사' 열 찾기 (유연한 대응)
+                teacher_col = [col for col in df.columns if '교사' in col or '담당' in col][0]
+                student_id_col = [col for col in df.columns if '학번' in col][0]
+                student_name_col = [col for col in df.columns if '이름' in col or '성명' in col][0]
+                course_col = [col for col in df.columns if '강좌' in col or '과목' in col][0]
+
                 for _, row in df.iterrows():
-                    t_name = str(row['세특담당교사']).strip() if pd.notna(row['세특담당교사']) else ""
-                    if t_name == "" or t_name == "nan":
-                        continue
+                    t_name = str(row[teacher_col]).strip() if pd.notna(row[teacher_col]) else ""
+                    # 빈 칸이거나 공백으로만 채워진 경우 예외 처리
+                    if t_name == "" or t_name.lower() == "nan" or t_name == "None":
+                        t_name = "미배정"
                     
+                    s_id = str(row[student_id_col]).strip()
+                    s_name = str(row[student_name_col]).strip()
+                    c_name = str(row[course_col]).strip()
+
                     cursor.execute("""
                         INSERT INTO student_courses (student_id, student_name, course_name, teacher_name, report_link, seuteuk_content)
                         VALUES (?, ?, ?, ?, ?, ?)
-                    """, (str(row['학번']), row['이름'], row['강좌'], t_name, "", ""))
+                    """, (s_id, s_name, c_name, t_name, "", ""))
                 conn.commit()
                 print("▶ [성공] 기초 학생 데이터 DB 탑재 완료!")
             except Exception as e:
-                print(f"▶ [오류] 데이터 삽입 중 문제 발생: {e}")
+                print(f"▶ [오류] 데이터 파싱 및 삽입 중 문제 발생: {e}")
         else:
-            print("▶ [알림] students_data.csv 파일이 없거나 인코딩이 맞지 않아 빈 상태로 시작합니다.")
+            print("▶ [알림] students_data.csv 파일이 없거나 읽을 수 없습니다.")
 
 load_initial_excel_data()
 
@@ -95,16 +108,19 @@ async def index():
 # 2. 교사별 담당 학생 목록 및 세특 입력 화면
 @app.get("/teacher/list", response_class=HTMLResponse)
 async def teacher_list(teacher_name: str):
+    search_name = teacher_name.strip()
+    
+    # 교사 이름 검색 시 앞뒤 공백을 무시하고 부분 일치(LIKE) 또는 정확히 일치 조회
     cursor.execute("""
         SELECT id, student_id, student_name, course_name, report_link, seuteuk_content 
         FROM student_courses 
-        WHERE teacher_name = ?
+        WHERE teacher_name = ? OR teacher_name LIKE ?
         ORDER BY student_id ASC
-    """, (teacher_name.strip(),))
+    """, (search_name, f"%{search_name}%"))
     rows = cursor.fetchall()
     
     if not rows:
-        return f'<html><head><meta charset="UTF-8"></head><body style="text-align:center;margin-top:100px;font-family:sans-serif;"><h3>❌ "{teacher_name}" 선생님으로 등록된 담당 학생 명단이 없습니다.</h3><p style="color:gray;">오타나 공백이 없는지 확인해 주세요.</p><a href="/">돌아가기</a></body></html>'
+        return f'<html><head><meta charset="UTF-8"></head><body style="text-align:center;margin-top:100px;font-family:sans-serif;"><h3>❌ "{teacher_name}" 선생님으로 등록된 담당 학생 명단이 없습니다.</h3><p style="color:gray;">오타나 성명 앞뒤의 공백을 확인해 주세요.</p><a href="/">돌아가기</a></body></html>'
     
     table_rows = ""
     for idx, r in enumerate(rows):
@@ -243,7 +259,6 @@ async def upload_reports(file: UploadFile = File(...), username: str = Depends(a
     try:
         contents = await file.read()
         
-        # 구글폼 CSV 인코딩 유연한 대응
         df = None
         for enc in ["utf-8-sig", "cp949", "utf-8", "euc-kr"]:
             try:
@@ -255,6 +270,7 @@ async def upload_reports(file: UploadFile = File(...), username: str = Depends(a
         if df is None:
             raise Exception("CSV 파일의 인코딩을 해석할 수 없습니다.")
         
+        df.columns = [col.strip() for col in df.columns]
         student_id_col = [col for col in df.columns if '학번' in col][0]
         report_link_col = [col for col in df.columns if '파일' in col or '보고서' in col or '제출' in col][0]
 
