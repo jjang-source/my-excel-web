@@ -314,7 +314,7 @@ async def admin_page(username: str = Depends(authenticate_admin)):
     </body></html>
     """
 
-# 5. 관리자 기능: 구글 폼 보고서 파일 링크 매핑 (인코딩 에러 및 학교 맞춤형 열 이름 완벽 지원형)
+# 5. 관리자 기능: 구글 폼 보고서 파일 링크 매핑 (텍스트 내 쉼표/줄바꿈 에러 완전 방어형)
 @app.post("/admin/upload-reports")
 async def upload_reports(file: UploadFile = File(...), username: str = Depends(authenticate_admin)):
     try:
@@ -322,9 +322,16 @@ async def upload_reports(file: UploadFile = File(...), username: str = Depends(a
         
         df = None
         encodings_to_try = ["utf-8-sig", "cp949", "utf-8", "euc-kr", "utf-16", "cp950", "latin1"]
+        
         for enc in encodings_to_try:
             try:
-                df = pd.read_csv(io.BytesIO(contents), encoding=enc, errors='replace')
+                # ⭐ [핵심 보완] on_bad_lines='skip'을 추가하여 데이터 형식이 뒤틀린 행이 있어도 튕기지 않고 무사히 넘어가도록 설정
+                df = pd.read_csv(
+                    io.BytesIO(contents), 
+                    encoding=enc, 
+                    errors='replace', 
+                    on_bad_lines='skip'
+                )
                 print(f"▶ [성공] 구글폼 CSV 파일을 {enc} 인코딩으로 해석했습니다.")
                 break
             except Exception:
@@ -333,10 +340,11 @@ async def upload_reports(file: UploadFile = File(...), username: str = Depends(a
         if df is None:
             try:
                 decoded_text = contents.decode('utf-8', errors='replace')
-                df = pd.read_csv(io.StringIO(decoded_text))
+                df = pd.read_csv(io.StringIO(decoded_text), on_bad_lines='skip')
             except Exception as e:
-                raise Exception(f"인코딩 강제 변환 실패: {e}")
+                raise Exception(f"데이터 파싱 강제 실패: {e}")
         
+        # 열 이름 앞뒤 공백 제거 및 줄바꿈 정리
         df.columns = [str(col).strip().replace('\n', ' ') for col in df.columns]
         
         try:
@@ -351,25 +359,29 @@ async def upload_reports(file: UploadFile = File(...), username: str = Depends(a
 
         updated_count = 0
         for _, row in df.iterrows():
-            if pd.isna(row[student_id_col]): 
+            # 혹시 에러로 인해 특정 칸이 누락된 행은 안전하게 스킵
+            try:
+                if pd.isna(row[student_id_col]): 
+                    continue
+                
+                s_id_raw = row[student_id_col]
+                if isinstance(s_id_raw, float) or isinstance(s_id_raw, int):
+                    s_id = str(int(s_id_raw)).strip()
+                else:
+                    s_id = str(s_id_raw).strip().split('.')[0]
+
+                link = str(row[report_link_col]).strip() if pd.notna(row[report_link_col]) else ""
+                
+                cursor.execute("UPDATE student_courses SET report_link = ? WHERE student_id = ?", (link, s_id))
+                updated_count += cursor.rowcount
+            except Exception:
+                # 데이터가 깨진 한두 줄은 무시하고 다음 학생으로 진행
                 continue
             
-            s_id_raw = row[student_id_col]
-            if isinstance(s_id_raw, float) or isinstance(s_id_raw, int):
-                s_id = str(int(s_id_raw)).strip()
-            else:
-                s_id = str(s_id_raw).strip().split('.')[0]
-
-            link = str(row[report_link_col]).strip() if pd.notna(row[report_link_col]) else ""
-            
-            cursor.execute("UPDATE student_courses SET report_link = ? WHERE student_id = ?", (link, s_id))
-            updated_count += cursor.rowcount
-            
         conn.commit()
-        return f'<html><head><meta charset="UTF-8"><script>alert("{updated_count}명의 구글 폼 보고서 링크가 완벽하게 매핑되었습니다!"); location.href="/admin";</script></head><body></body></html>'
+        return f'<html><head><meta charset="UTF-8"><script>alert("{updated_count}명의 구글 폼 보고서 링크가 안전하게 매핑되었습니다!"); location.href="/admin";</script></head><body></body></html>'
     except Exception as e:
         return f'<html><head><meta charset="UTF-8"><script>alert("에러가 발생했습니다. 오류 내용: {e}"); location.href="/admin";</script></head><body></body></html>'
-
 
 # 6. 최종 엑셀 추출 기능 (안전 버퍼 출력형)
 @app.get("/admin/download")
