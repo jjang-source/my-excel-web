@@ -1,24 +1,33 @@
-# 5. 관리자 기능: 구글 폼 보고서 파일 링크 매핑 (학교 맞춤형 열 인식 보완)
+# 5. 관리자 기능: 구글 폼 보고서 파일 링크 매핑 (인코딩 에러 완벽 방어형)
 @app.post("/admin/upload-reports")
 async def upload_reports(file: UploadFile = File(...), username: str = Depends(authenticate_admin)):
     try:
         contents = await file.read()
         
         df = None
-        for enc in ["utf-8-sig", "cp949", "utf-8", "euc-kr"]:
+        # 전 세계 모든 인코딩을 유연하게 다 시도하고, 최악의 경우 글자가 일부 깨지더라도 무조건 강제로 읽어오도록 개선
+        encodings_to_try = ["utf-8-sig", "cp949", "utf-8", "euc-kr", "utf-16", "cp950", "latin1"]
+        for enc in encodings_to_try:
             try:
-                df = pd.read_csv(io.BytesIO(contents), encoding=enc)
+                # errors='ignore' 또는 'replace'를 주어 인코딩 해석 실패 오류를 원천 차단
+                df = pd.read_csv(io.BytesIO(contents), encoding=enc, errors='replace')
+                print(f"▶ [성공] 구글폼 CSV 파일을 {enc} 인코딩으로 해석했습니다.")
                 break
             except Exception:
                 continue
                 
         if df is None:
-            raise Exception("CSV 파일의 인코딩을 해석할 수 없습니다.")
+            # 최종 방어선: 바이트를 직접 문자열로 바꾸며 강제 파싱 시도
+            try:
+                decoded_text = contents.decode('utf-8', errors='replace')
+                df = pd.read_csv(io.StringIO(decoded_text))
+            except Exception as e:
+                raise Exception(f"인코딩 강제 변환 실패: {e}")
         
-        # 열 이름 앞뒤 공백 제거
-        df.columns = [col.strip() for col in df.columns]
+        # 열 이름 앞뒤 공백 제거 및 줄바꿈 정리
+        df.columns = [str(col).strip().replace('\n', ' ') for col in df.columns]
         
-        # ⭐ 선생님의 구글 폼 열 이름 구조에 완벽하게 대응하도록 유연한 검색 적용
+        # 선생님의 구글 폼 열 이름 구조 검색
         try:
             student_id_col = [col for col in df.columns if '학번' in col][0]
         except IndexError:
@@ -27,7 +36,7 @@ async def upload_reports(file: UploadFile = File(...), username: str = Depends(a
         try:
             report_link_col = [col for col in df.columns if '업로드' in col or '파일' in col or '보고서' in col or '제출' in col or '링크' in col][0]
         except IndexError:
-            raise Exception("파일에서 '업로드', '보고서', '파일' 등이 포함된 링크 열을 찾을 수 없습니다.")
+            raise Exception("파일에서 '업로드', '보고서' 등이 포함된 링크 열을 찾을 수 없습니다.")
 
         updated_count = 0
         for _, row in df.iterrows():
@@ -51,4 +60,5 @@ async def upload_reports(file: UploadFile = File(...), username: str = Depends(a
         conn.commit()
         return f'<html><head><meta charset="UTF-8"><script>alert("{updated_count}명의 구글 폼 보고서 링크가 완벽하게 매핑되었습니다!"); location.href="/admin";</script></head><body></body></html>'
     except Exception as e:
+        return f'<html><head><meta charset="UTF-8"><script>alert("에러가 발생했습니다. 오류 내용: {e}"); location.href="/admin";</script></head><body></body></html>'
         return f'<html><head><meta charset="UTF-8"><script>alert("에러가 발생했습니다. 오류 내용: {e}"); location.href="/admin";</script></head><body></body></html>'
