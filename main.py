@@ -40,25 +40,34 @@ conn.commit()
 
 # [최초 1회 실행] 첨부해주신 엑셀(CSV) 기반 데이터 자동 탑재
 def load_initial_excel_data():
-    cursor.execute("SELECT COUNT(*) FROM student_courses")
-    if cursor.fetchone()[0] == 0:
-        try:
-            # 💡 주의: 업로드할 파일명이 정확히 'students_data.csv' 여야 합니다.
-            df = pd.read_csv("students_data.csv", encoding="utf-8")
-            for _, row in df.iterrows():
-                # 빈 교사 이름 예외 처리 (공백 제거)
-                t_name = str(row['세특담당교사']).strip() if pd.notna(row['세특담당교사']) else ""
-                if t_name == "" or t_name == "nan":
-                    continue  # 담당 교사가 지정되지 않은 행은 우선 제외하거나 빈 문자열 처리
-                
-                cursor.execute("""
-                    INSERT INTO student_courses (student_id, student_name, course_name, teacher_name, report_link, seuteuk_content)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (str(row['학번']), row['이름'], row['강좌'], t_name, "", ""))
-            conn.commit()
-            print("▶ [성공] 기초 학생 데이터 탑재 완료!")
-        except Exception as e:
-            print(f"▶ [알림] 초기 파일(students_data.csv) 로드 대기 중... 오류: {e}")
+    try:
+        # SQLite 연결을 함수 내부에서 독립적으로 수행하여 Thread 오류 방지
+        local_conn = sqlite3.connect("school_seuteuk.db")
+        local_cursor = local_conn.cursor()
+        
+        local_cursor.execute("SELECT COUNT(*) FROM student_courses")
+        if local_cursor.fetchone()[0] == 0:
+            try:
+                # 파일이 있으면 로드 시도
+                df = pd.read_csv("students_data.csv", encoding="utf-8")
+                for _, row in df.iterrows():
+                    t_name = str(row['세특담당교사']).strip() if pd.notna(row['세특담당교사']) else ""
+                    if t_name == "" or t_name == "nan":
+                        continue
+                    
+                    local_cursor.execute("""
+                        INSERT INTO student_courses (student_id, student_name, course_name, teacher_name, report_link, seuteuk_content)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (str(row['학번']), row['이름'], row['강좌'], t_name, "", ""))
+                local_conn.commit()
+                print("▶ [성공] 기초 학생 데이터 탑재 완료!")
+            except FileNotFoundError:
+                print("▶ [알림] students_data.csv 파일이 기깃허브에 없습니다. 빈 상태로 시작합니다.")
+            except Exception as e:
+                print(f"▶ [오류] 파일 로드 중 문제 발생: {e}")
+        local_conn.close()
+    except Exception as e:
+        print(f"▶ DB 초기화 오류: {e}")
 
 load_initial_excel_data()
 
