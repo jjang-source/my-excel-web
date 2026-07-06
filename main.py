@@ -8,7 +8,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 app = FastAPI()
 security = HTTPBasic()
 
-# 🔐 마스터 관리자 ID / PW (원하는 대로 변경 가능)
+# 🔐 마스터 관리자 ID / PW
 ADMIN_USERNAME = "cheongwon"
 ADMIN_PASSWORD = "cheongwon"
 
@@ -38,36 +38,38 @@ CREATE TABLE IF NOT EXISTS student_courses (
 """)
 conn.commit()
 
-# [최초 1회 실행] 첨부해주신 엑셀(CSV) 기반 데이터 자동 탑재
+# [최초 1회 실행] 업로드된 학생 데이터 로드 (한국형 엑셀 CSV 인코딩 완벽 대응)
 def load_initial_excel_data():
-    try:
-        # SQLite 연결을 함수 내부에서 독립적으로 수행하여 Thread 오류 방지
-        local_conn = sqlite3.connect("school_seuteuk.db")
-        local_cursor = local_conn.cursor()
-        
-        local_cursor.execute("SELECT COUNT(*) FROM student_courses")
-        if local_cursor.fetchone()[0] == 0:
+    cursor.execute("SELECT COUNT(*) FROM student_courses")
+    if cursor.fetchone()[0] == 0:
+        # 여러 한글 인코딩 방식을 순서대로 시도하여 깨짐 방지
+        encodings = ["utf-8-sig", "cp949", "utf-8", "euc-kr"]
+        df = None
+        for enc in encodings:
             try:
-                # 파일이 있으면 로드 시도
-                df = pd.read_csv("students_data.csv", encoding="utf-8")
+                df = pd.read_csv("students_data.csv", encoding=enc)
+                print(f"▶ [성공] students_data.csv 파일을 {enc} 인코딩으로 읽었습니다.")
+                break
+            except Exception:
+                continue
+
+        if df is not None:
+            try:
                 for _, row in df.iterrows():
                     t_name = str(row['세특담당교사']).strip() if pd.notna(row['세특담당교사']) else ""
                     if t_name == "" or t_name == "nan":
                         continue
                     
-                    local_cursor.execute("""
+                    cursor.execute("""
                         INSERT INTO student_courses (student_id, student_name, course_name, teacher_name, report_link, seuteuk_content)
                         VALUES (?, ?, ?, ?, ?, ?)
                     """, (str(row['학번']), row['이름'], row['강좌'], t_name, "", ""))
-                local_conn.commit()
-                print("▶ [성공] 기초 학생 데이터 탑재 완료!")
-            except FileNotFoundError:
-                print("▶ [알림] students_data.csv 파일이 기깃허브에 없습니다. 빈 상태로 시작합니다.")
+                conn.commit()
+                print("▶ [성공] 기초 학생 데이터 DB 탑재 완료!")
             except Exception as e:
-                print(f"▶ [오류] 파일 로드 중 문제 발생: {e}")
-        local_conn.close()
-    except Exception as e:
-        print(f"▶ DB 초기화 오류: {e}")
+                print(f"▶ [오류] 데이터 삽입 중 문제 발생: {e}")
+        else:
+            print("▶ [알림] students_data.csv 파일이 없거나 인코딩이 맞지 않아 빈 상태로 시작합니다.")
 
 load_initial_excel_data()
 
@@ -90,7 +92,7 @@ async def index():
     </form></body></html>
     """
 
-# 2. 교사별 담당 학생 목록 및 세특 입력 화면 (실시간 글자수 확인 가능)
+# 2. 교사별 담당 학생 목록 및 세특 입력 화면
 @app.get("/teacher/list", response_class=HTMLResponse)
 async def teacher_list(teacher_name: str):
     cursor.execute("""
@@ -121,15 +123,20 @@ async def teacher_list(teacher_name: str):
                     <input type="hidden" name="db_id" value="{db_id}">
                     <input type="hidden" name="teacher_name" value="{teacher_name}">
                     <textarea id="txt_{idx}" name="seuteuk_content" rows="4" style="width:100%; padding:8px; box-sizing:border-box; border:1px solid #ccc; border-radius:4px; font-size:13px;" oninput="checkBytes(this, 'byte_{idx}')" placeholder="내용을 입력하세요 (개학 전까지 750바이트 권장)">{s_content}</textarea>
-                    <div style="display:flex; justify-content:between; align-items:center;">
+                    <div style="display:flex; align-items:center;">
                         <span style="font-size:12px; color:#666;"><span id="byte_{idx}" style="font-weight:bold; color:#007bff;">0</span> / 750 바이트</span>
                         <button type="submit" style="margin-left:auto; padding:4px 12px; background:#28a745; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">저장</button>
                     </div>
                 </form>
                 <script>
-                    // 초기 글자수 계산 실행
                     document.addEventListener("DOMContentLoaded", function() {{
-                        checkBytes(document.getElementById("txt_{idx}"), "byte_{idx}");
+                        var obj = document.getElementById("txt_{idx}");
+                        var str = obj.value;
+                        var rbyte = 0;
+                        for (var i = 0; i < str.length; i++) {{
+                            if (str.charCodeAt(i) > 127) {{ rbyte += 3; }} else {{ rbyte++; }}
+                        }}
+                        document.getElementById("byte_{idx}").innerText = rbyte;
                     }});
                 </script>
             </td>
@@ -143,15 +150,12 @@ async def teacher_list(teacher_name: str):
     table{{width:100%; border-collapse:collapse; margin-top:10px;}} th,td{{border:1px solid #ddd; padding:12px; text-align:left;}}
     th{{background:#f2f2f2; font-weight:bold;}} tr:nth-child(even){{background-color:#f9f9f9;}}</style>
     <script>
-        // 한글 3바이트, 영문/숫자/공백 1바이트 계산기 함수
         function checkBytes(obj, targetId) {{
             var str = obj.value;
-            var str_len = str.length;
             var rbyte = 0;
-            for (var i = 0; i < str_len; i++) {{
-                var code = str.charCodeAt(i);
-                if (code > 127) {{ rbyte += 3; }} else {{ rbyte++; }}
-            }
+            for (var i = 0; i < str.length; i++) {{
+                if (str.charCodeAt(i) > 127) {{ rbyte += 3; }} else {{ rbyte++; }}
+            }}
             document.getElementById(targetId).innerText = rbyte;
         }}
     </script>
@@ -238,7 +242,18 @@ async def admin_page(username: str = Depends(authenticate_admin)):
 async def upload_reports(file: UploadFile = File(...), username: str = Depends(authenticate_admin)):
     try:
         contents = await file.read()
-        df = pd.read_csv(io.BytesIO(contents), encoding='utf-8')
+        
+        # 구글폼 CSV 인코딩 유연한 대응
+        df = None
+        for enc in ["utf-8-sig", "cp949", "utf-8", "euc-kr"]:
+            try:
+                df = pd.read_csv(io.BytesIO(contents), encoding=enc)
+                break
+            except Exception:
+                continue
+                
+        if df is None:
+            raise Exception("CSV 파일의 인코딩을 해석할 수 없습니다.")
         
         student_id_col = [col for col in df.columns if '학번' in col][0]
         report_link_col = [col for col in df.columns if '파일' in col or '보고서' in col or '제출' in col][0]
@@ -258,7 +273,7 @@ async def upload_reports(file: UploadFile = File(...), username: str = Depends(a
         return f'<html><head><meta charset="UTF-8"><script>alert("에러가 발생했습니다. 구글폼 CSV에 학번, 보고서 관련 컬럼이 있는지 확인해 주세요. 오류: {e}"); location.href="/admin";</script></head><body></body></html>'
 
 
-# 6. 최종 엑셀 추출 기능 (학번, 이름, 강좌명, 세특담당교사, 입력된 세특)
+# 6. 최종 엑셀 추출 기능
 @app.get("/admin/download")
 async def download(username: str = Depends(authenticate_admin)):
     query = """
