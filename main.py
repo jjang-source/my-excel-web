@@ -314,69 +314,84 @@ async def admin_page(username: str = Depends(authenticate_admin)):
     </body></html>
     """
 
-# 5. 관리자 기능: 구글 폼 보고서 파일 링크 매핑 (텍스트 내 쉼표/줄바꿈 에러 완전 방어형)
+# 5. 관리자 기능: 구글 폼 보고서 파일 링크 매핑 (CSV 구조 깨짐/열 인식 오류 최종 완벽 방어형)
 @app.post("/admin/upload-reports")
 async def upload_reports(file: UploadFile = File(...), username: str = Depends(authenticate_admin)):
     try:
         contents = await file.read()
         
-        df = None
+        # 1. 인코딩 강제 디코딩 시도 (글자 깨짐 방지)
+        decoded_text = None
         encodings_to_try = ["utf-8-sig", "cp949", "utf-8", "euc-kr", "utf-16", "cp950", "latin1"]
-        
         for enc in encodings_to_try:
             try:
-                # ⭐ [핵심 보완] on_bad_lines='skip'을 추가하여 데이터 형식이 뒤틀린 행이 있어도 튕기지 않고 무사히 넘어가도록 설정
-                df = pd.read_csv(
-                    io.BytesIO(contents), 
-                    encoding=enc, 
-                    errors='replace', 
-                    on_bad_lines='skip'
-                )
-                print(f"▶ [성공] 구글폼 CSV 파일을 {enc} 인코딩으로 해석했습니다.")
+                decoded_text = contents.decode(enc)
+                print(f"▶ [성공] 구글폼 CSV 파일을 {enc} 인코딩으로 텍스트 변환했습니다.")
                 break
             except Exception:
                 continue
                 
-        if df is None:
-            try:
-                decoded_text = contents.decode('utf-8', errors='replace')
-                df = pd.read_csv(io.StringIO(decoded_text), on_bad_lines='skip')
-            except Exception as e:
-                raise Exception(f"데이터 파싱 강제 실패: {e}")
+        if decoded_text is None:
+            decoded_text = contents.decode('utf-8', errors='replace')
+
+        # 2. 텍스트를 줄바꿈 기준으로 분리하여 한 줄씩 직접 파싱 (Pandas 표 구조 깨짐 에러 원천 차단)
+        lines = decoded_text.splitlines()
+        if not lines:
+            raise Exception("CSV 파일에 데이터가 없습니다.")
+
+        # 첫 번째 줄(제목 행) 분석하여 학번과 링크 열의 위치 찾기
+        header = [col.strip().replace('"', '') for col in lines[0].split(',')]
         
-        # 열 이름 앞뒤 공백 제거 및 줄바꿈 정리
-        df.columns = [str(col).strip().replace('\n', ' ') for col in df.columns]
+        student_id_idx = -1
+        report_link_idx = -1
         
-        try:
-            student_id_col = [col for col in df.columns if '학번' in col][0]
-        except IndexError:
-            raise Exception("파일에서 '학번'이 포함된 열을 찾을 수 없습니다.")
-            
-        try:
-            report_link_col = [col for col in df.columns if '업로드' in col or '파일' in col or '보고서' in col or '제출' in col or '링크' in col][0]
-        except IndexError:
-            raise Exception("파일에서 '업로드', '보고서' 등이 포함된 링크 열을 찾을 수 없습니다.")
+        for i, col in enumerate(header):
+            if '학번' in col:
+                student_id_idx = i
+            if any(keyword in col for keyword in ['업로드', '파일', '보고서', '제출', '링크']):
+                report_link_idx = i
+
+        # 만약 콤마 분리로 못 찾았다면 전체 텍스트에서 강제 매칭 검사
+        if student_id_idx == -1 or report_link_idx == -1:
+            # 두 번째 예비책: 따옴표(Quotes)를 감안한 좀 더 유연한 제목 매칭
+            import csv
+            reader = csv.reader(io.StringIO(lines[0]))
+            parsed_header = next(reader, [])
+            for i, col in enumerate(parsed_header):
+                if '학번' in col: student_id_idx = i
+                if any(keyword in col for keyword in ['업로드', '파일', '보고서', '제출', '링크']): report_link_idx = i
+
+        if student_id_idx == -1:
+            raise Exception(f"파일에서 '학번'이 포함된 열을 찾을 수 없습니다. (인식된 제목: {header[:4]})")
+        if report_link_idx == -1:
+            raise Exception("파일에서 '업로드'나 '보고서' 링크가 포함된 열을 찾을 수 없습니다.")
+
+        # 3. 데이터 입력 및 업데이트 수행
+        import csv
+        reader = csv.reader(io.StringIO(decoded_text))
+        next(reader) # 제목 행 스킵
 
         updated_count = 0
-        for _, row in df.iterrows():
-            # 혹시 에러로 인해 특정 칸이 누락된 행은 안전하게 스킵
+        for row in reader:
             try:
-                if pd.isna(row[student_id_col]): 
+                if not row or len(row) <= max(student_id_idx, report_link_idx):
                     continue
                 
-                s_id_raw = row[student_id_col]
-                if isinstance(s_id_raw, float) or isinstance(s_id_raw, int):
-                    s_id = str(int(s_id_raw)).strip()
-                else:
-                    s_id = str(s_id_raw).strip().split('.')[0]
+                # 학번 정제
+                s_id_raw = row[student_id_idx].strip()
+                if not s_id_raw or s_id_raw.lower() == 'nan':
+                    continue
+                
+                # 소수점(.0)이 붙어있다면 제거
+                s_id = s_id_raw.split('.')[0]
 
-                link = str(row[report_link_col]).strip() if pd.notna(row[report_link_col]) else ""
+                # 구글 드라이브 링크 추출
+                link = row[report_link_idx].strip()
                 
                 cursor.execute("UPDATE student_courses SET report_link = ? WHERE student_id = ?", (link, s_id))
                 updated_count += cursor.rowcount
             except Exception:
-                # 데이터가 깨진 한두 줄은 무시하고 다음 학생으로 진행
-                continue
+                continue # 데이터가 누락되거나 깨진 특정 행은 스킵하고 계속 진행
             
         conn.commit()
         return f'<html><head><meta charset="UTF-8"><script>alert("{updated_count}명의 구글 폼 보고서 링크가 안전하게 매핑되었습니다!"); location.href="/admin";</script></head><body></body></html>'
