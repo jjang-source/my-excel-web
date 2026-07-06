@@ -9,8 +9,8 @@ app = FastAPI()
 security = HTTPBasic()
 
 # 🔐 마스터 관리자 ID / PW
-ADMIN_USERNAME = "admin123"
-ADMIN_PASSWORD = "super-secret-password-99"
+ADMIN_USERNAME = "cheongwon"
+ADMIN_PASSWORD = "cheongwon"
 
 def authenticate_admin(credentials: HTTPBasicCredentials = Depends(security)):
     if credentials.username != ADMIN_USERNAME or credentials.password != ADMIN_PASSWORD:
