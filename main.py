@@ -114,7 +114,7 @@ async def index():
     <p style="color:gray; font-size:13px;">배정되신 <b>세특담당교사 성명</b>을 입력하시면 담당 학생 및 강좌 목록이 나타납니다.</p>
     <form action="/teacher/list" method="get">
         <label><b>교사 성명 입력:</b></label>
-        <input type="text" name="teacher_name" placeholder="예: 안경남" required>
+        <input type="text" name="teacher_name" placeholder="예: 홍길순" required>
         <button type="submit">담당 강좌/학생 조회</button>
     </form></body></html>
     """
