@@ -314,19 +314,18 @@ async def admin_page(username: str = Depends(authenticate_admin)):
     </body></html>
     """
 
-# 5. 관리자 기능: 구글 폼 보고서 파일 링크 매핑 (CSV 구조 깨짐/열 인식 오류 최종 완벽 방어형)
+# 5. 관리자 기능: 구글 폼 보고서 파일 링크 매핑 (학번 + 강좌명 유연한 동시 매칭 버전)
 @app.post("/admin/upload-reports")
 async def upload_reports(file: UploadFile = File(...), username: str = Depends(authenticate_admin)):
     try:
         contents = await file.read()
         
-        # 1. 인코딩 강제 디코딩 시도 (글자 깨짐 방지)
+        # 1. 인코딩 디코딩
         decoded_text = None
         encodings_to_try = ["utf-8-sig", "cp949", "utf-8", "euc-kr", "utf-16", "cp950", "latin1"]
         for enc in encodings_to_try:
             try:
                 decoded_text = contents.decode(enc)
-                print(f"▶ [성공] 구글폼 CSV 파일을 {enc} 인코딩으로 텍스트 변환했습니다.")
                 break
             except Exception:
                 continue
@@ -334,69 +333,74 @@ async def upload_reports(file: UploadFile = File(...), username: str = Depends(a
         if decoded_text is None:
             decoded_text = contents.decode('utf-8', errors='replace')
 
-        # 2. 텍스트를 줄바꿈 기준으로 분리하여 한 줄씩 직접 파싱 (Pandas 표 구조 깨짐 에러 원천 차단)
         lines = decoded_text.splitlines()
         if not lines:
             raise Exception("CSV 파일에 데이터가 없습니다.")
 
-        # 첫 번째 줄(제목 행) 분석하여 학번과 링크 열의 위치 찾기
-        header = [col.strip().replace('"', '') for col in lines[0].split(',')]
+        # 2. 제목 행 분석 (학번, 강좌, 링크 열 위치 탐색)
+        import csv
+        reader = csv.reader(io.StringIO(decoded_text))
+        header = [col.strip().replace('\n', ' ') for col in next(reader, [])]
         
         student_id_idx = -1
+        course_name_idx = -1
         report_link_idx = -1
         
         for i, col in enumerate(header):
             if '학번' in col:
                 student_id_idx = i
+            if '강좌' in col or '과목' in col:
+                course_name_idx = i
             if any(keyword in col for keyword in ['업로드', '파일', '보고서', '제출', '링크']):
                 report_link_idx = i
 
-        # 만약 콤마 분리로 못 찾았다면 전체 텍스트에서 강제 매칭 검사
-        if student_id_idx == -1 or report_link_idx == -1:
-            # 두 번째 예비책: 따옴표(Quotes)를 감안한 좀 더 유연한 제목 매칭
-            import csv
-            reader = csv.reader(io.StringIO(lines[0]))
-            parsed_header = next(reader, [])
-            for i, col in enumerate(parsed_header):
-                if '학번' in col: student_id_idx = i
-                if any(keyword in col for keyword in ['업로드', '파일', '보고서', '제출', '링크']): report_link_idx = i
-
         if student_id_idx == -1:
-            raise Exception(f"파일에서 '학번'이 포함된 열을 찾을 수 없습니다. (인식된 제목: {header[:4]})")
+            raise Exception("파일에서 '학번' 열을 찾을 수 없습니다.")
+        if course_name_idx == -1:
+            raise Exception("파일에서 '강좌(과목)' 열을 찾을 수 없습니다.")
         if report_link_idx == -1:
-            raise Exception("파일에서 '업로드'나 '보고서' 링크가 포함된 열을 찾을 수 없습니다.")
+            raise Exception("파일에서 '보고서 링크' 열을 찾을 수 없습니다.")
 
-        # 3. 데이터 입력 및 업데이트 수행
-        import csv
-        reader = csv.reader(io.StringIO(decoded_text))
-        next(reader) # 제목 행 스킵
-
+        # 3. 학번 + 강좌명을 동시에 고려하여 정밀 업데이트 진행
         updated_count = 0
         for row in reader:
             try:
-                if not row or len(row) <= max(student_id_idx, report_link_idx):
+                if not row or len(row) <= max(student_id_idx, course_name_idx, report_link_idx):
                     continue
                 
                 # 학번 정제
                 s_id_raw = row[student_id_idx].strip()
-                if not s_id_raw or s_id_raw.lower() == 'nan':
-                    continue
-                
-                # 소수점(.0)이 붙어있다면 제거
+                if not s_id_raw or s_id_raw.lower() == 'nan': continue
                 s_id = s_id_raw.split('.')[0]
 
-                # 구글 드라이브 링크 추출
+                # 구글폼에 입력된 강좌명 (예: (자율)1. 창의 융합 AI 해커톤 캠프)
+                form_course = row[course_name_idx].strip()
+                if not form_course: continue
+
+                # 구글 드라이브 링크
                 link = row[report_link_idx].strip()
-                
-                cursor.execute("UPDATE student_courses SET report_link = ? WHERE student_id = ?", (link, s_id))
-                updated_count += cursor.rowcount
+                if not link: continue
+
+                # 💡 핵심 로직: 해당 학번의 학생이 가진 DB 내 모든 강좌 목록을 가져옴
+                cursor.execute("SELECT id, course_name FROM student_courses WHERE student_id = ?", (s_id,))
+                db_rows = cursor.fetchall()
+
+                # DB의 강좌명과 구글폼 강좌명을 유연하게 비교 (서로 단어가 포함되어 있는지 검사)
+                for db_id, db_course in db_rows:
+                    clean_db_course = db_course.strip()
+                    # 예: "AI 해커톤"이 구글폼 강좌명에 들어있거나, 반대로 구글폼 강좌명 단어가 DB에 들어있거나
+                    if clean_db_course in form_course or form_course in clean_db_course:
+                        cursor.execute("UPDATE student_courses SET report_link = ? WHERE id = ?", (link, db_id))
+                        updated_count += 1
+                        break
             except Exception:
-                continue # 데이터가 누락되거나 깨진 특정 행은 스킵하고 계속 진행
+                continue
             
         conn.commit()
-        return f'<html><head><meta charset="UTF-8"><script>alert("{updated_count}명의 구글 폼 보고서 링크가 안전하게 매핑되었습니다!"); location.href="/admin";</script></head><body></body></html>'
+        return f'<html><head><meta charset="UTF-8"><script>alert("{updated_count}건의 보고서 링크가 학번과 강좌명 매칭을 통해 정확하게 연동되었습니다!"); location.href="/admin";</script></head><body></body></html>'
     except Exception as e:
         return f'<html><head><meta charset="UTF-8"><script>alert("에러가 발생했습니다. 오류 내용: {e}"); location.href="/admin";</script></head><body></body></html>'
+
 
 # 6. 최종 엑셀 추출 기능 (안전 버퍼 출력형)
 @app.get("/admin/download")
